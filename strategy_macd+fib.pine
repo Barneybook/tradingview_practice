@@ -1,0 +1,131 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © BarneyChen
+// @version=6
+strategy(title = "MACD + 斐波那契回撤 - 短線", default_qty_type = strategy.percent_of_equity, default_qty_value = 100, initial_capital = 100)
+// indicator("MACD + 斐波那契回撤 - 短線", max_lines_count=500, max_labels_count=500)
+
+tpPercent = input.float(4.0, "止盈 %", step=0.1)   // 例如 2% 就輸入 2
+slPercent = input.float(0.6, "止損 %", step=0.1)   // 例如 1% 就輸入 1
+
+// ==========================
+//        MACD 主指標
+// ==========================
+fastLength   = input.int(12, "MACD Fast Length")
+slowLength   = input.int(26, "MACD Slow Length")
+signalLength = input.int(9,  "MACD Signal Length")
+
+fastEMA = ta.ema(close, fastLength)
+slowEMA = ta.ema(close, slowLength)
+DIF = fastEMA - slowEMA
+DEA = ta.ema(DIF, signalLength)
+MACD = 2 * (DIF - DEA)
+
+// ==========================
+//     MACD 副圖顯示
+// ==========================
+plot(DIF, "DIF", color=color.new(color.blue, 0))
+plot(DEA, "DEA", color=color.new(color.orange, 0))
+plot(MACD, "MACD", color=DIF > DEA ? color.green : color.red, style=plot.style_histogram)
+
+
+// ==========================
+//     金叉 / 死叉訊號
+// ==========================
+gold  = ta.crossover(DIF, DEA)
+death = ta.crossunder(DIF, DEA)
+
+plotshape(gold, title="Gold Cross", location=location.belowbar, color=color.green, style=shape.labelup, text="多",force_overlay = true)
+plotshape(death, title="Dead Cross", location=location.abovebar, color=color.red, style=shape.labeldown, text="空",force_overlay = true)
+
+
+// strategy.entry(id, direction, qty, limit, stop, oca_name, oca_type, comment, alert_message, disable_alert) → void
+
+//============================
+// 2. 斐波那契回撤的計算方式
+//    以最近的高點 / 低點區間為基礎
+//    fibLow  = Low
+//    fibHigh = High
+//============================
+lookback = input.int(48, "Fibonacci Lookback")
+
+fibHigh = ta.highest(high, lookback)
+fibLow  = ta.lowest(low, lookback)
+
+fibLevel_0618 = fibHigh - (fibHigh - fibLow) * 0.618
+fibLevel_0700 = fibHigh - (fibHigh - fibLow) * 0.700
+
+plot(fibLevel_0618, "Fib 0.618", color=color.new(color.green, 20),force_overlay = true)
+plot(fibLevel_0700, "Fib 0.700", color=color.new(color.orange, 20),force_overlay = true)
+
+///============================
+// 3. 是否觸及 Fibonacci 區間（同一根 K 線）
+//============================
+touchFib = low <= fibLevel_0618 and high >= fibLevel_0700
+
+//============================
+// 4. 同一根 K 線下單邏輯
+//============================
+
+entryPrice = close
+
+// 多單：金叉 + 同根間觸及 Fib
+if gold and touchFib
+    strategy.entry("Long", strategy.long, limit=entryPrice)
+
+    takeProfitLong = entryPrice * (1 + tpPercent/100)
+    stopLossLong   = entryPrice * (1 - slPercent/100)
+
+    strategy.exit("Long TP/SL", "Long", stop=stopLossLong, limit=takeProfitLong)
+
+
+// 空單：死叉 + 同根間觸及 Fib
+if death and touchFib
+    strategy.entry("Short", strategy.short, limit=entryPrice)
+
+    takeProfitShort = entryPrice * (1 - tpPercent/100)
+    stopLossShort   = entryPrice * (1 + slPercent/100)
+
+    strategy.exit("Short TP/SL", "Short", stop=stopLossShort, limit=takeProfitShort)
+
+
+forceExitBars = input.int(4, "4 小時內離場（1H K 根數）", minval=1)
+maxBarsInTrade = input.int(10, "單筆超過 N 根 K 強制離場", minval=1)
+
+
+[ DIF4H, DEA4H ] = request.security(syminfo.tickerid, "240",
+     [ DIF, DEA ], lookahead=barmerge.lookahead_off)
+
+
+var int entryBar = na
+
+if strategy.position_size != 0 and na(entryBar)
+    entryBar := bar_index               // 開單的 K 編號
+
+if strategy.position_size == 0
+    entryBar := na                      // 無持倉就清空
+
+barsInPosition = strategy.position_size != 0 ? bar_index - entryBar : 0
+
+//=========================
+// 多單：1H 多頭，但 4H 空頭 → 強制離場
+//=========================
+if strategy.position_size > 0
+    if DIF4H < DEA4H
+        // 若超過設定的 4 小時 → 強制平倉
+        if barsInPosition >= forceExitBars
+            strategy.close("Long", comment="4H 趨勢反向 強制離場")
+
+//=========================
+// 空單：1H 空頭，但 4H 多頭 → 強制離場
+//=========================
+if strategy.position_size < 0
+    if DIF4H > DEA4H
+        if barsInPosition >= forceExitBars
+            strategy.close("Short", comment="4H 趨勢反向 強制離場")
+
+if strategy.position_size != 0 and barsInPosition >= maxBarsInTrade
+    if strategy.position_size > 0
+        strategy.close("Long",  comment="逾時強制平倉")
+    if strategy.position_size < 0
+        strategy.close("Short", comment="逾時強制平倉")
+
