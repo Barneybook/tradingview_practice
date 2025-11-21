@@ -4,8 +4,8 @@
 strategy(title = "MACD + 斐波那契回撤 - 短線", default_qty_type = strategy.percent_of_equity, default_qty_value = 100, initial_capital = 100)
 // indicator("MACD + 斐波那契回撤 - 短線", max_lines_count=500, max_labels_count=500)
 
-tpPercent = input.float(4.0, "止盈 %", step=0.1)   // 例如 2% 就輸入 2
-slPercent = input.float(0.6, "止損 %", step=0.1)   // 例如 1% 就輸入 1
+tpPercent = input.float(2.0, "止盈 %", step=0.1)   // 例如 2% 就輸入 2
+slPercent = input.float(1.0, "止損 %", step=0.1)   // 例如 1% 就輸入 1
 
 // ==========================
 //        MACD 主指標
@@ -13,6 +13,8 @@ slPercent = input.float(0.6, "止損 %", step=0.1)   // 例如 1% 就輸入 1
 fastLength   = input.int(12, "MACD Fast Length")
 slowLength   = input.int(26, "MACD Slow Length")
 signalLength = input.int(9,  "MACD Signal Length")
+
+pivotLen = 2   // 左右 2 根，共 5-Bar Pivot
 
 fastEMA = ta.ema(close, fastLength)
 slowEMA = ta.ema(close, slowLength)
@@ -34,43 +36,215 @@ plot(MACD, "MACD", color=DIF > DEA ? color.green : color.red, style=plot.style_h
 gold  = ta.crossover(DIF, DEA)
 death = ta.crossunder(DIF, DEA)
 
-plotshape(gold, title="Gold Cross", location=location.belowbar, color=color.green, style=shape.labelup, text="多",force_overlay = true)
-plotshape(death, title="Dead Cross", location=location.abovebar, color=color.red, style=shape.labeldown, text="空",force_overlay = true)
+plotshape(gold, title="Gold Cross", location=location.belowbar, color=color.yellow, style=shape.labelup, text="金",force_overlay = true)
+plotshape(death, title="Dead Cross", location=location.abovebar, color=color.white, style=shape.labeldown, text="死",force_overlay = true)
 
 
 // strategy.entry(id, direction, qty, limit, stop, oca_name, oca_type, comment, alert_message, disable_alert) → void
 
 //============================
-// 2. 斐波那契回撤的計算方式
-//    以最近的高點 / 低點區間為基礎
-//    fibLow  = Low
-//    fibHigh = High
+// 2. Pivot High / Pivot Low（5-Bar）
 //============================
-lookback = input.int(48, "Fibonacci Lookback")
 
-fibHigh = ta.highest(high, lookback)
-fibLow  = ta.lowest(low, lookback)
+pivotHigh(i) =>
+    i >= 2 and i <= bar_index - 2  and high[i] > high[i+1] and high[i] > high[i+2] and high[i] > high[i-1] and high[i] > high[i-2]
 
-fibLevel_0618 = fibHigh - (fibHigh - fibLow) * 0.618
-fibLevel_0700 = fibHigh - (fibHigh - fibLow) * 0.700
+pivotLow(i) =>
+    i >= 2 and i <= bar_index - 2  and low[i] < low[i+1] and low[i] < low[i+2] and low[i] < low[i-1] and low[i] < low[i-2]
 
-plot(fibLevel_0618, "Fib 0.618", color=color.new(color.green, 20),force_overlay = true)
-plot(fibLevel_0700, "Fib 0.700", color=color.new(color.orange, 20),force_overlay = true)
+// Swing High 標記
+plotshape(pivotHigh(2), title="high", location=location.abovebar, color=color.rgb(255,0,255,70), style=shape.labeldown, text="高",force_overlay = true, offset = -2)
+// Swing Low 標記
+plotshape(pivotLow(2), title="low", location=location.belowbar, color=color.rgb(69, 171, 255, 70), style=shape.labelup, text="低",force_overlay = true, offset = -2)
 
-///============================
-// 3. 是否觸及 Fibonacci 區間（同一根 K 線）
-//============================
-touchFib = low <= fibLevel_0618 and high >= fibLevel_0700
 
 //============================
-// 4. 同一根 K 線下單邏輯
+// 3. 尋找最近 pivot（左邊搜尋）
+//============================
+findRecentPivotHigh(startIndex) =>
+    float pivotValue = na
+    int pivotIndex = na
+
+    int maxLookback = startIndex - 2
+    for i = 0 to maxLookback
+        int idx = startIndex - i
+        if idx > 2 and pivotHigh(idx)
+            pivotValue := high[idx]
+            pivotIndex := idx
+            break
+    [pivotValue, pivotIndex]
+
+findRecentPivotLow(startIndex) =>
+    float pivotValue = na
+    int pivotIndex = na
+
+    int maxLookback = startIndex - 2
+    for i = 0 to maxLookback
+        int idx = startIndex - i
+        if idx > 2 and pivotLow(idx)
+            pivotValue := low[idx]
+            pivotIndex := idx
+            break
+    [pivotValue, pivotIndex]
+
+//============================
+// 4. 找上一段趨勢的 pivot 組
+//============================
+var float swingHigh = na
+var int swingHighIndex = na
+var float swingLow = na
+var int swingLowIndex = na
+
+var int lastDeadCross = na
+var int lastGoldCross = na
+
+if gold
+    lastGoldCross := bar_index
+
+if death
+    lastDeadCross := bar_index
+
+
+//--------------------------------------------------------
+// 只有當右側兩根出現後，才能開始找 pivot
+//--------------------------------------------------------
+canCheckGold = not na(lastGoldCross) and bar_index >= lastGoldCross + 2
+canCheckDead = not na(lastDeadCross) and bar_index >= lastDeadCross + 2
+
+//----------------------------
+// 死叉 → 要找上一段下跌（高 → 低）
+//----------------------------
+if death and not na(lastGoldCross)
+    [phVal, phIndex] = findRecentPivotHigh(lastGoldCross)
+    [plVal, plIndex] = findRecentPivotLow(lastGoldCross)
+
+    if not na(phIndex) and not na(plIndex) and phIndex < plIndex
+        swingHigh := phVal
+        swingHighIndex := phIndex
+        swingLow := plVal
+        swingLowIndex := plIndex
+
+//----------------------------
+// 金叉 → 要找上一段上漲（低 → 高）
+//----------------------------
+if gold and not na(lastDeadCross)
+    [plVal2, plIndex2] = findRecentPivotLow(lastDeadCross)
+    [phVal2, phIndex2] = findRecentPivotHigh(lastDeadCross)
+
+    if not na(plIndex2) and not na(phIndex2) and plIndex2 < phIndex2
+        swingLow := plVal2
+        swingLowIndex := plIndex2
+        swingHigh := phVal2
+        swingHighIndex := phIndex2
+
+//============================
+// 5. 尋找 "金叉前 → 上漲趨勢" pivotLow → pivotHigh
+//============================
+float bullLow = na
+int bullLowIdx = na
+float bullHigh = na
+int bullHighIdx = na
+
+if not na(lastGoldCross)
+    start = lastGoldCross - 1
+    steps = start - 2
+    for step = 0 to steps
+        i = start - step
+        if i < 2
+            break
+        
+        // 先找到 pivotLow（更左邊）
+        if na(bullLowIdx) and pivotLow(i)
+            bullLow := low[i]
+            bullLowIdx := i
+        
+        // 再找到 pivotHigh（更右邊）
+        if na(bullHighIdx) and pivotHigh(i)
+            bullHigh := high[i]
+            bullHighIdx := i
+        
+        // 要形成上漲趨勢必須：低點在前，高點在後
+        if not na(bullLowIdx) and not na(bullHighIdx) and bullLowIdx < bullHighIdx
+            break
+
+//============================
+// 6. 尋找 "死叉前 → 下跌趨勢" pivotHigh → pivotLow
+//============================
+float bearHigh = na
+int bearHighIdx = na
+float bearLow = na
+int bearLowIdx = na
+
+if not na(lastDeadCross)
+    start = lastDeadCross - 1
+    steps = start - 2
+    for step = 0 to steps
+        i = start - step
+        if i < 2
+            break
+        
+        if na(bearHighIdx) and pivotHigh(i)
+            bearHigh := high[i]
+            bearHighIdx := i
+        
+        if na(bearLowIdx) and pivotLow(i)
+            bearLow := low[i]
+            bearLowIdx := i
+        
+        // 下跌趨勢 = 高點在前、低點在後
+        if not na(bearHighIdx) and not na(bearLowIdx) and bearHighIdx < bearLowIdx
+            break
+
+//============================
+// 7. 將結果標示在圖上
+//============================
+
+// 上漲趨勢（做多前）
+plotshape(not na(bullLowIdx) and bullLowIdx == bar_index, style=shape.labelup, color=color.yellow, text="多：低點", size=size.tiny,force_overlay = true)
+plotshape(not na(bullHighIdx) and bullHighIdx == bar_index, style=shape.labeldown, color=color.yellow, text="多：高點", size=size.tiny,force_overlay = true)
+
+// 下跌趨勢（做空前）
+plotshape(not na(bearHighIdx) and bearHighIdx == bar_index, style=shape.labeldown, color=color.white, text="空：高點", size=size.tiny,force_overlay = true)
+plotshape(not na(bearLowIdx) and bearLowIdx == bar_index, style=shape.labelup, color=color.white, text="空：低點", size=size.tiny,force_overlay = true)
+
+
+//============================
+// 5. 依 pivot 畫出 Fib 區間
+//============================
+longFib0  = swingLow
+longFib100 = swingHigh
+var float longFib618 = na
+var float longFib700 = na
+
+shortFib100 = swingHigh
+shortFib0 = swingLow
+var float shortFib618 = na
+var float shortFib700 = na
+
+if not na(swingLow) and not na(swingHigh)
+    longFib618 := longFib0 + (longFib100 - longFib0) * 0.618
+    longFib700 := longFib0 + (longFib100 - longFib0) * 0.700
+
+    shortFib618 := shortFib100 - (shortFib100 - shortFib0) * 0.618
+    shortFib700 := shortFib100 - (shortFib100 - shortFib0) * 0.700
+
+// plot(longFib618, "Long Fib 0.618", color=color.new(color.green, 20),force_overlay = true)
+// plot(longFib700, "Long Fib 0.700", color=color.new(color.green, 40),force_overlay = true)
+// plot(shortFib618, "Short Fib 0.618", color=color.new(color.red, 20),force_overlay = true)
+// plot(shortFib700, "Short Fib 0.700", color=color.new(color.red, 40),force_overlay = true)
+
+//============================
+// 6. 回撤區間觸及 → 進場（同根 K）
 //============================
 
 entryPrice = close
 
+touchLong = low <= longFib700 and high >= longFib618
+touchShort = low <= shortFib618 and high >= shortFib700
+
 // 多單：金叉 + 同根間觸及 Fib
-if gold and touchFib
-    strategy.entry("Long", strategy.long, limit=entryPrice)
+if gold and touchLong
+    // strategy.entry("Long", strategy.long, limit=entryPrice)
 
     takeProfitLong = entryPrice * (1 + tpPercent/100)
     stopLossLong   = entryPrice * (1 - slPercent/100)
@@ -79,8 +253,8 @@ if gold and touchFib
 
 
 // 空單：死叉 + 同根間觸及 Fib
-if death and touchFib
-    strategy.entry("Short", strategy.short, limit=entryPrice)
+if death and touchShort
+    // strategy.entry("Short", strategy.short, limit=entryPrice)
 
     takeProfitShort = entryPrice * (1 - tpPercent/100)
     stopLossShort   = entryPrice * (1 + slPercent/100)
@@ -92,8 +266,7 @@ forceExitBars = input.int(4, "4 小時內離場（1H K 根數）", minval=1)
 maxBarsInTrade = input.int(10, "單筆超過 N 根 K 強制離場", minval=1)
 
 
-[ DIF4H, DEA4H ] = request.security(syminfo.tickerid, "240",
-     [ DIF, DEA ], lookahead=barmerge.lookahead_off)
+[ DIF4H, DEA4H ] = request.security(syminfo.tickerid, "240", [ DIF, DEA ], lookahead=barmerge.lookahead_off)
 
 
 var int entryBar = na
